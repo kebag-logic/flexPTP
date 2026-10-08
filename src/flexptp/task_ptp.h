@@ -77,6 +77,26 @@ bool ptp_transmit_enqueue(const RawPtpMessage * pMsg);
 void ptp_transmit_timestamp_cb(uint32_t uid, uint32_t seconds, uint32_t nanoseconds);
 
 /**
+ * Report that the transmit timestamp of a message will never arrive: the
+ * Network Stack Driver gave up waiting for it, or the transmission failed.
+ * The message is released without its transmit callback, and the loss is
+ * counted. Callable from any thread.
+ *
+ * @param uid UID of the message
+ */
+void ptp_transmit_timestamp_lost(uint32_t uid);
+
+/**
+ * Start, restart or stop the auxiliary timer. While it runs, a
+ * PTP_CEV_AUX_TIMER core event arrives once every period. On a platform
+ * without a timer of its own, the period is rounded to whole heartbeat ticks.
+ *
+ * @param period_us period in microseconds, 0 stops the timer
+ * @return true if the timer now runs (or has stopped, for 0) as asked
+ */
+bool ptp_aux_timer_set(uint32_t period_us);
+
+/**
  * Read transmit timestamp and release message buffer area.
  * 
  * @param tag unique message tag

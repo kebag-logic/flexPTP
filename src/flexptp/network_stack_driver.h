@@ -55,6 +55,18 @@ void ptp_nsd_transmit_msg(RawPtpMessage *pMsg, uint32_t uid);
  */
 void ptp_nsd_igmp_join_leave(bool join);
 
+/**
+ * Report a change of the link state (carrier) to the core. Implemented by the
+ * core, called by a Network Stack Driver that can observe the link; from any
+ * thread.
+ *
+ * A driver that cannot observe the link never calls it, and the core assumes
+ * the link is up.
+ *
+ * @param up true if the link is up
+ */
+void ptp_nsd_link_state_changed(bool up);
+
 #ifdef __cplusplus
 }
 #endif

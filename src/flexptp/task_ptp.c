@@ -84,6 +84,8 @@ typedef struct {
     uint32_t nanoseconds; ///< Timestamp nanoseconds
 } TxTs;
 
+#define TXTS_LOST_NS (0xFFFFFFFFu) ///< nanoseconds marking a transmit timestamp that will never arrive
+
 // -----------------------------
 
 ///\cond 0
@@ -95,6 +97,15 @@ static TimerHandle_t sHeartBeatTmr;
 static osTimerId_t sHeartBeatTmr;
 #elif defined(FLEXPTP_LINUX)
 static timer_t sHeartBeatTmr;
+#endif
+
+// auxiliary timer (see ptp_aux_timer_set())
+#ifdef FLEXPTP_LINUX
+static timer_t sAuxTmr;
+static bool sAuxTmrCreated = false;
+#else
+static uint32_t sAuxPeriodTicks = 0; // period in heartbeat ticks, 0: stopped
+static uint32_t sAuxTickCntr = 0;    // ticks since the last expiry
 #endif
 
 // queues for message reception and transmission
@@ -225,6 +236,71 @@ void ptp_start_heartbeat_tmr() {
         .it_value = {.tv_sec = 1, .tv_nsec = 0} // just some non-zero value
     };
     timer_settime(sHeartBeatTmr, 0, &its, NULL);
+#endif
+}
+
+#ifdef FLEXPTP_LINUX
+/**
+ * Auxiliary timer expiry: hand a PTP_CEV_AUX_TIMER event to the core.
+ */
+static void ptp_aux_tmr_cb(union sigval data) {
+    (void)data;
+
+    PtpCoreEvent event = {.code = PTP_CEV_AUX_TIMER, .w = 0, .dw = 0};
+    ptp_event_enqueue(&event);
+}
+#endif
+
+bool ptp_aux_timer_set(uint32_t period_us) {
+#ifdef FLEXPTP_LINUX
+    // created on first use, on the monotonic clock: no clock step moves it
+    if (!sAuxTmrCreated) {
+        struct sigevent sev = {
+            .sigev_notify = SIGEV_THREAD,
+            .sigev_notify_function = ptp_aux_tmr_cb,
+            .sigev_value = {.sival_ptr = NULL}};
+
+        if (timer_create(CLOCK_MONOTONIC, &sev, &sAuxTmr) < 0) {
+            return false;
+        }
+
+        sAuxTmrCreated = true;
+    }
+
+    // the first expiry one period from now; a zero period stops the timer
+    struct itimerspec its;
+    memset(&its, 0, sizeof(its));
+    its.it_interval.tv_sec = period_us / 1000000;
+    its.it_interval.tv_nsec = (period_us % 1000000) * 1000;
+    its.it_value = its.it_interval;
+
+    return timer_settime(sAuxTmr, 0, &its, NULL) == 0;
+#else
+    // whole heartbeat ticks, at least one
+    if (period_us == 0) {
+        sAuxPeriodTicks = 0;
+    } else {
+        uint32_t period_ms = (period_us + 500) / 1000;
+        uint32_t ticks = (period_ms + PTP_HEARTBEAT_TICKRATE_MS / 2) / PTP_HEARTBEAT_TICKRATE_MS;
+        sAuxPeriodTicks = MAX(ticks, 1);
+    }
+
+    sAuxTickCntr = 0;
+    return true;
+#endif
+}
+
+/**
+ * Remove the auxiliary timer.
+ */
+static void ptp_remove_aux_tmr() {
+#ifdef FLEXPTP_LINUX
+    if (sAuxTmrCreated) {
+        timer_delete(sAuxTmr);
+        sAuxTmrCreated = false;
+    }
+#else
+    sAuxPeriodTicks = 0;
 #endif
 }
 
@@ -416,6 +492,7 @@ bool reg_task_ptp() {
 // unregister PTP task
 void unreg_task_ptp() {
     ptp_remove_heartbeat_tmr(); // remove the heartbeat timer
+    ptp_remove_aux_tmr();       // and the auxiliary timer
     NsdInitSettings nsdInit = {
         -1, -1, {}, {}};
     ptp_nsd_init(&nsdInit); // de-initialize the network stack driver
@@ -646,6 +723,12 @@ void ptp_transmit_timestamp_cb(uint32_t uid, uint32_t seconds, uint32_t nanoseco
     }
 }
 
+void ptp_transmit_timestamp_lost(uint32_t uid) {
+    // travels the same way as a timestamp, so that the processing thread
+    // (and a transmission waiting for it) sees it in order
+    ptp_transmit_timestamp_cb(uid, 0, TXTS_LOST_NS);
+}
+
 bool ptp_read_and_clear_transmit_timestamp(uint32_t tag, TimestampI *pTs) {
     // fetch message
     RawPtpMessage *pRawMsg = msgb_get_sent_by_tag(&sRawTxMsgBuf, tag);
@@ -745,7 +828,14 @@ fifo_pop(&sNotificationFIFO, &notification);
             CLILOG(S.logging.logid && S.logging.transmission, "[LOG-TX] ");
             CLILOG(S.logging.transmission, "[% 8u]---> %u\n", S.ticks, ts.uid);
             RawPtpMessage *pRawMsg = msgb_get_by_uid(&sRawTxMsgBuf, ts.uid);
-            if (pRawMsg != NULL) {
+            if ((pRawMsg != NULL) && (ts.nanoseconds == TXTS_LOST_NS)) {
+                // the timestamp will never arrive: no callback, release the message
+                msgb_free(&sRawTxMsgBuf, pRawMsg);
+                S.stats.drop_cntrs.txts++;
+
+                CLILOG(S.logging.logid && S.logging.info, "[LOG-INFO] ");
+                CLILOG(S.logging.info, "Transmit timestamp lost (%u), message released.\n", ts.uid);
+            } else if (pRawMsg != NULL) {
                 // insert the timestamp
                 pRawMsg->ts.sec = ts.seconds;
                 pRawMsg->ts.nanosec = ts.nanoseconds;
@@ -853,6 +943,16 @@ fifo_pop(&sNotificationFIFO, &notification);
             if (event.code == PTP_CEV_HEARTBEAT) {
                 msgb_tick(&sRawRxMsgBuf);
                 msgb_tick(&sRawTxMsgBuf);
+
+#ifndef FLEXPTP_LINUX
+                // the auxiliary timer, on heartbeat ticks
+                if ((sAuxPeriodTicks != 0) && (++sAuxTickCntr >= sAuxPeriodTicks)) {
+                    sAuxTickCntr = 0;
+
+                    PtpCoreEvent aux = {.code = PTP_CEV_AUX_TIMER, .w = 0, .dw = 0};
+                    ptp_event_enqueue(&aux);
+                }
+#endif
             }
 
             // handle peaceful termination

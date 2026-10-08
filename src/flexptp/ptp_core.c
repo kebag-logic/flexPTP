@@ -8,6 +8,7 @@
 
 #include "common.h"
 #include "event.h"
+#include "gptp.h"
 #include "logging.h"
 #include "master.h"
 #include "slave.h"
@@ -89,6 +90,9 @@ void ptp_init(void) {
     /* ---- MASTER --- */
     ptp_master_init();
 
+    /* ---- gPTP ----- */
+    ptp_gptp_init();
+
     // ---------------------
 
     ptp_reset(); // reset all PTP systems
@@ -152,6 +156,9 @@ static void ptp_core_reset() {
     /* ---- MASTER --- */
     ptp_master_reset();
 
+    /* ---- gPTP ----- */
+    ptp_gptp_reset();
+
     // ------------------------
 
     // resume the heartbeat timer
@@ -210,6 +217,7 @@ void ptp_process_event(const PtpCoreEvent *event) {
         ptp_bmca_tick();
         ptp_slave_tick();
         ptp_master_tick();
+        ptp_gptp_tick();
     } break;
     case PTP_CEV_BMCA_STATE_CHANGED: {
         PtpBmcaFsmState bmcaState = event->w.w;
@@ -228,6 +236,12 @@ void ptp_process_event(const PtpCoreEvent *event) {
     case PTP_CEV_RESET: {
         ptp_core_reset();
     } break;
+    case PTP_CEV_LINK_STATE: {
+        ptp_gptp_link_state(event->w.w != 0);
+    } break;
+    case PTP_CEV_AUX_TIMER: {
+        ptp_gptp_aux_timer();
+    } break;
     default:
         break;
     }
@@ -241,6 +255,11 @@ uint32_t ptp_get_tick() {
 
 void ptp_reset() {
     PtpCoreEvent event = { .code = PTP_CEV_RESET, .w = 0, .dw = 0 };
+    ptp_event_enqueue(&event);
+}
+
+void ptp_nsd_link_state_changed(bool up) {
+    PtpCoreEvent event = { .code = PTP_CEV_LINK_STATE, .w = { .w = up ? 1 : 0 }, .dw = 0 };
     ptp_event_enqueue(&event);
 }
 

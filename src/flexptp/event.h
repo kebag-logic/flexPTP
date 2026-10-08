@@ -20,6 +20,8 @@ typedef enum {
     PTP_CEV_BMCA_STATE_CHANGED, ///< The BMCA state has changed
     PTP_CEV_RESET,              ///< A reset has been issued
     PTP_CEV_TERMINATE,          ///< A shutdown is requested
+    PTP_CEV_LINK_STATE,         ///< The link went up (w = 1) or down (w = 0)
+    PTP_CEV_AUX_TIMER,          ///< The auxiliary timer has expired (see ptp_aux_timer_set())
 } PtpCoreEventCode;
 
 #include <stdint.h>

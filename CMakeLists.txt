@@ -157,6 +157,10 @@ set(FLEXPTP_SRC
     event.h
     format_utils.c
     format_utils.h
+    gptp.c
+    gptp.h
+    gptp_status.c
+    gptp_status.h
     logging.c
     logging.h
     master.c

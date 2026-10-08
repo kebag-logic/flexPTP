@@ -504,6 +504,13 @@ typedef enum { PTP_FC_IDLE = 0,                    ///< Fast correction algorith
 } PtpFastCompState;
 
 /**
+ * @brief IEEE 802.1AS (gPTP) state of the port.
+ */
+typedef struct {
+    bool linkUp; ///< the link (carrier) is up; true unless the NSD reports otherwise
+} PtpGptpState;
+
+/**
  * @brief Giant PTP core state object.
  */
 typedef struct {
@@ -519,6 +526,7 @@ typedef struct {
 
     PtpBmcaState bmca;       ///< BMCA state
     PtpNetworkState network; ///< Network state
+    PtpGptpState gptp;       ///< 802.1AS state
 
     uint32_t ticks; ///< ticks counting form the initialization
 
