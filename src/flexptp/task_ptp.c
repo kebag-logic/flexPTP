@@ -21,6 +21,11 @@
 #include "port/osless/fifo.h"
 #endif
 
+#ifdef FLEXPTP_LINUX
+#include <errno.h>
+#include <sched.h>
+#endif
+
 // ---------------------------
 
 #ifdef FLEXPTP_NON_LINUX_OS
@@ -127,6 +132,7 @@ static int sTxPacketFIFO[2];
 static int sEventFIFO[2];
 static int sTxCbFIFO[2];
 static sem_t sTxCbSem;
+static uint32_t sTxWaitTimeouts = 0; // transmissions whose callback never came within the safety timeout
 #elif defined(FLEXPTP_OSLESS)
 static Fifo sEventFIFO;
 static Fifo sRxPacketFIFO;
@@ -194,7 +200,8 @@ static bool ptp_create_heartbeat_tmr() {
         .sigev_notify = SIGEV_THREAD,
         .sigev_notify_function = ptp_heartbeat_tmr_cb,
         .sigev_value = {.sival_ptr = NULL}};
-    if (timer_create(CLOCK_REALTIME, &sev, &sHeartBeatTmr) < 0) {
+    // the monotonic clock: setting the time (the PHC's, or the system's) cannot stretch a tick
+    if (timer_create(CLOCK_MONOTONIC, &sev, &sHeartBeatTmr) < 0) {
         sHeartBeatTmr = NULL;
     }
 #endif
@@ -745,6 +752,71 @@ bool ptp_read_and_clear_transmit_timestamp(uint32_t tag, TimestampI *pTs) {
     return true;
 }
 
+#ifdef FLEXPTP_LINUX
+
+// the Linux network stack driver's timestamp timeout, where it provides one
+extern uint32_t linux_nsd_get_txts_timeout_ms(void) __attribute__((weak));
+
+#define TX_WAIT_DEFAULT_TIMEOUT_MS (20) ///< the driver's timeout when it does not tell
+
+/**
+ * Wait for the transmit callback (a timestamp, or the report of its loss) of
+ * the message just handed to the driver. The driver reports every message by
+ * its own timeout; this wait is bounded too, at three times that timeout, as a
+ * safety net: a driver that loses a message must not stall the stack.
+ */
+static void ptp_wait_transmit_callback(void) {
+    uint32_t driver_ms = TX_WAIT_DEFAULT_TIMEOUT_MS;
+    if (linux_nsd_get_txts_timeout_ms != NULL) {
+        driver_ms = linux_nsd_get_txts_timeout_ms();
+    }
+
+    uint32_t wait_ms = 3 * driver_ms;
+
+    // on the monotonic clock: a clock step must not stretch the wait
+    struct timespec deadline;
+    clock_gettime(CLOCK_MONOTONIC, &deadline);
+
+    deadline.tv_sec += wait_ms / 1000;
+    deadline.tv_nsec += (long)(wait_ms % 1000) * 1000000;
+
+    if (deadline.tv_nsec >= 1000000000) {
+        deadline.tv_sec += 1;
+        deadline.tv_nsec -= 1000000000;
+    }
+
+    int ret;
+    do {
+        ret = sem_clockwait(&sTxCbSem, CLOCK_MONOTONIC, &deadline);
+    } while ((ret != 0) && (errno == EINTR));
+
+    if ((ret != 0) && (errno == ETIMEDOUT)) {
+        sTxWaitTimeouts++;
+
+        CLILOG(S.logging.logid && S.logging.info, "[LOG-INFO] ");
+        CLILOG(S.logging.info, "No transmit callback within %u ms (%u so far), going on.\n", wait_ms, sTxWaitTimeouts);
+    }
+}
+
+bool ptp_task_set_rt_priority(int priority) {
+    if (sTH == 0) {
+        return false;
+    }
+
+    struct sched_param sp;
+    memset(&sp, 0, sizeof(sp));
+
+    int policy = SCHED_OTHER;
+    if (priority > 0) {
+        policy = SCHED_FIFO;
+        sp.sched_priority = priority;
+    }
+
+    return pthread_setschedparam(sTH, policy, &sp) == 0;
+}
+
+#endif // FLEXPTP_LINUX
+
 /**
  * flexPTP's main loop.
  * This function is only exposed if operating in FLEXPTP_OSLESS mode!
@@ -884,7 +956,7 @@ fifo_pop(&sNotificationFIFO, &notification);
                 CLILOG(S.logging.transmission, "[% 8u] %u (%u) --->\n", S.ticks, uid, pRawMsg->tag & (~((uint32_t)MSGBUF_TAG_OVERWRITE)));
                 ptp_nsd_transmit_msg(pRawMsg, uid);
 #ifdef FLEXPTP_LINUX
-                sem_wait(&sTxCbSem);
+                ptp_wait_transmit_callback();
 #endif
             }
         }

@@ -86,6 +86,8 @@ elseif (FLEXPTP_NSD STREQUAL "LINUX")
     set(FLEXPTP_NSD_SRC
         port/example_netstack_drivers/nsd_linux.c
         port/example_netstack_drivers/nsd_linux.h
+        port/example_netstack_drivers/nsd_linux_txts.c
+        port/example_netstack_drivers/nsd_linux_txts.h
     )
     set(FLEXPTP_NETWORK_STACK)
 else()
