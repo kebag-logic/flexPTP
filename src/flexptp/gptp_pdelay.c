@@ -48,11 +48,14 @@ static void pdelay_set_as_capable(bool asCapable) {
 
 /**
  * asCapable (IEEE 802.1AS-2020 11.2.2): a measured link delay within the
- * threshold, the neighbour answering, one responder, and not ourselves.
+ * threshold, the neighbour answering, one responder, not ourselves, and a
+ * measured neighborRateRatio. The last one means a neighbour that was lost
+ * takes two exchanges to be trusted again, not one.
  */
 void ptp_gptp_pdelay_judge(void) {
     bool ok = PD.delayValid &&
               PD.isMeasuringDelay &&
+              (PD.nrrValid || !S.gptp.computeNrr) &&
               !PD.multipleResponders &&
               !PD.selfResponder &&
               (PD.meanLinkDelay <= S.gptp.neighborPropDelayThresh_ns) &&
@@ -176,7 +179,6 @@ static void pdelay_try_complete(void) {
     }
 
     PD.selfResponder = false;
-    PD.multipleResponders = false;
 
     // a one-step responder gives no t3 in its own clock: no rate from it
     if (S.gptp.computeNrr && !PD.oneStep) {
@@ -285,6 +287,13 @@ void ptp_gptp_pdelay_tick(void) {
 
     PD.tmr = 0;
 
+    // the request before had its window: one responder clears an earlier
+    // multiple-responder fault; more than one was flagged as they came
+    if (PD.responses == 1) {
+        PD.multipleResponders = false;
+        ptp_gptp_pdelay_judge();
+    }
+
     // the request before was not answered in time
     if (PD.inFlight) {
         PD.inFlight = false;
@@ -328,24 +337,34 @@ void ptp_gptp_pdelay_rx(const RawPtpMessage *pRawMsg, const PtpHeader *pHeader) 
         return;
     }
 
-    // a late answer, or one to an older request
-    if (!PD.inFlight || (pHeader->sequenceID != PD.seq)) {
+    // an answer to an older request
+    if (pHeader->sequenceID != PD.seq) {
         return;
     }
 
     if (pHeader->messageType == PTP_MT_PDelay_Resp) {
+        // counted until the next request, also after this one completed: a
+        // second responder may answer after the first exchange is done
         PD.responses++;
 
         // more than one port answered: no measurement from this request
         if (PD.responses > 1) {
+            if (PD.responses == 2) {
+                PD.multipleTotal++;
+
+                CLILOG(S.logging.logid && S.logging.info, "[LOG-INFO] ");
+                CLILOG(S.logging.info, "Pdelay_Req #%u: answered by more than one port\n", (unsigned)PD.seq);
+            }
+
             PD.inFlight = false;
             PD.multipleResponders = true;
-            PD.multipleTotal++;
-
-            CLILOG(S.logging.logid && S.logging.info, "[LOG-INFO] ");
-            CLILOG(S.logging.info, "Pdelay_Req #%u: answered by more than one port\n", (unsigned)PD.seq);
 
             ptp_gptp_pdelay_judge();
+            return;
+        }
+
+        // the exchange is done already (one-step), or was abandoned
+        if (!PD.inFlight) {
             return;
         }
 
@@ -370,8 +389,9 @@ void ptp_gptp_pdelay_rx(const RawPtpMessage *pRawMsg, const PtpHeader *pHeader) 
         PTP_IUEV(PTP_UEV_PDELAY_RESP_RECVED);
 
     } else if (pHeader->messageType == PTP_MT_PDelay_Resp_Follow_Up) {
-        // it must come from the port that sent the Pdelay_Resp
-        if (!PD.haveResp ||
+        // it must come from the port that sent the Pdelay_Resp, for an exchange still open
+        if (!PD.inFlight ||
+            !PD.haveResp ||
             (pHeader->clockIdentity != PD.responder) ||
             (pHeader->sourcePortID != PD.responderPort)) {
             return;
