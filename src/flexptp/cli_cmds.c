@@ -5,6 +5,8 @@
 #include <inttypes.h>
 
 #include "clock_utils.h"
+#include "gptp_settings.h"
+#include "gptp_status.h"
 #include "logging.h"
 #include "profiles.h"
 #include "ptp_core.h"
@@ -329,6 +331,126 @@ static CMD_FUNCTION(CB_priority) {
     return 0;
 }
 
+static const char *GPTP_PORT_STATES[] = {
+    "INITIALIZING",
+    "LISTENING",
+    "PRE_MASTER",
+    "MASTER",
+    "SLAVE",
+    "PASSIVE",
+    "UNCALIBRATED",
+    "FAULTY",
+    "DISABLED"};
+
+static void print_identity(const char *label, uint64_t id) {
+    MSG("%s%02x%02x%02x.%02x%02x.%02x%02x%02x\n",
+        label,
+        (unsigned)(id >> 56) & 0xFF, (unsigned)(id >> 48) & 0xFF, (unsigned)(id >> 40) & 0xFF,
+        (unsigned)(id >> 32) & 0xFF, (unsigned)(id >> 24) & 0xFF,
+        (unsigned)(id >> 16) & 0xFF, (unsigned)(id >> 8) & 0xFF, (unsigned)id & 0xFF);
+}
+
+/**
+ * on/off: 1, 0, or -1 for anything else.
+ */
+static int on_off(const char *s) {
+    if (!strcmp(s, "on")) {
+        return 1;
+    }
+
+    if (!strcmp(s, "off")) {
+        return 0;
+    }
+
+    return -1;
+}
+
+static CMD_FUNCTION(CB_gptp) {
+    if (argc >= 2) {
+        if (!strcmp(ppArgs[0], "nbthresh")) {
+            ptp_gptp_set_neighbor_prop_delay_thresh(atoll(ppArgs[1]));
+        } else if (!strcmp(ppArgs[0], "lostresp")) {
+            ptp_gptp_set_allowed_lost_responses(atoi(ppArgs[1]));
+        } else if (!strcmp(ppArgs[0], "gmcapable")) {
+            int en = on_off(ppArgs[1]);
+            if (en < 0) {
+                return -1;
+            }
+            ptp_gptp_set_gm_capable(en == 1);
+        } else {
+            return -1;
+        }
+
+        MSG("> neighborPropDelayThresh %" __PRI64_PREFIX "d ns, allowedLostResponses %u, gmCapable %s\n",
+            ptp_gptp_get_neighbor_prop_delay_thresh(),
+            (unsigned)ptp_gptp_get_allowed_lost_responses(),
+            ptp_gptp_get_gm_capable() ? "on" : "off");
+        return 0;
+    }
+
+    if ((argc == 1) && strcmp(ppArgs[0], "status")) {
+        return -1;
+    }
+
+    PtpGptpStatus st;
+    ptp_gptp_get_status(&st);
+
+    const char *state = (st.portState < sizeof(GPTP_PORT_STATES) / sizeof(GPTP_PORT_STATES[0])) ? GPTP_PORT_STATES[st.portState] : "?";
+
+    MSG("port %s, link %s, asCapable %u, measuring delay %u, domain %u, locked %u\n",
+        state, st.linkUp ? "up" : "down", st.asCapable, st.isMeasuringDelay, st.domain, st.locked);
+    print_identity("own clock      ", st.ownIdentity);
+    print_identity("grandmaster    ", st.gmIdentity);
+    MSG("gm quality     priority1 %u class %u accuracy 0x%02x variance 0x%04x priority2 %u, stepsRemoved %u, changes %u\n",
+        st.gmPriority1, st.gmClockClass, st.gmClockAccuracy, st.gmVariance, st.gmPriority2, st.stepsRemoved, (unsigned)st.gmChanges);
+    MSG("link delay     %" __PRI64_PREFIX "d ns, neighborRateRatio %.9f, rateRatio %.9f\n",
+        st.meanLinkDelay_ns, st.neighborRateRatio, st.rateRatio);
+    MSG("time error     %" __PRI64_PREFIX "d ns, tuning %.3f ppb, gmTimeBaseIndicator %u\n",
+        st.timeError_ns, st.tuning_ppb, st.gmTimeBaseIndicator);
+    MSG("intervals      sync %d, pdelay %d, announce %d\n",
+        st.logSyncInterval, st.logPdelayInterval, st.logAnnounceInterval);
+    MSG("counters       sync %u (timeouts %u), announce %u (timeouts %u), pdelay lost %u multiple %u, signaling %u, txts lost %u\n",
+        (unsigned)st.syncRx, (unsigned)st.syncTimeouts, (unsigned)st.announceRx, (unsigned)st.announceTimeouts,
+        (unsigned)st.pdelayLost, (unsigned)st.pdelayMultiple, (unsigned)st.signalingRx, (unsigned)st.txTimestampsLost);
+    MSG("reverse sync   %s, domain %u, every %u us, sent %u\n",
+        st.rsyncEnabled ? "on" : "off", st.rsyncDomain, (unsigned)st.rsyncInterval_us, (unsigned)st.rsyncSent);
+
+    return 0;
+}
+
+static CMD_FUNCTION(CB_rsync) {
+    if (argc >= 1) {
+        int en = on_off(ppArgs[0]);
+
+        if (en >= 0) {
+            ptp_rsync_enable(en == 1);
+        } else if ((argc >= 2) && !strcmp(ppArgs[0], "domain")) {
+            if (!ptp_rsync_set_domain(atoi(ppArgs[1]))) {
+                MSG("> the reverse sync domain must differ from the measured one\n");
+                return -1;
+            }
+        } else if ((argc >= 2) && !strcmp(ppArgs[0], "rate")) {
+            ptp_rsync_set_rate_pct(atoi(ppArgs[1]));
+        } else if ((argc >= 2) && !strcmp(ppArgs[0], "interval")) {
+            ptp_rsync_set_interval_ms(atoi(ppArgs[1]));
+        } else {
+            return -1;
+        }
+    }
+
+    uint32_t ms = ptp_rsync_get_interval_ms();
+
+    if (ms > 0) {
+        MSG("> reverse sync %s, domain %u, every %u ms\n",
+            ptp_rsync_is_enabled() ? "on" : "off", ptp_rsync_get_domain(), (unsigned)ms);
+    } else {
+        MSG("> reverse sync %s, domain %u, at %u %% of the incoming Sync interval\n",
+            ptp_rsync_is_enabled() ? "on" : "off", ptp_rsync_get_domain(), (unsigned)ptp_rsync_get_rate_pct());
+    }
+
+    return 0;
+}
+
 // command assignments
 enum PTP_CMD_IDS {
     CMD_RESET,
@@ -348,6 +470,8 @@ enum PTP_CMD_IDS {
     CMD_LOGPERIOD,
     CMD_COARSE_THRESHOLD,
     CMD_PRIORITY,
+    CMD_GPTP,
+    CMD_RSYNC,
     CMD_N
 };
 
@@ -380,6 +504,8 @@ void ptp_register_cli_commands() {
     sCmds[CMD_LOGPERIOD] = CLI_REG_CMD("ptp period <delreq|sync|ann> [<lp>|matched]\t\t\tPrint or set log. periods", 2, 0, CB_logPeriod);
     sCmds[CMD_COARSE_THRESHOLD] = CLI_REG_CMD("ptp coarse [threshold]\t\t\tPrint or set coarse correction threshold", 2, 0, CB_coarseThreshold);
     sCmds[CMD_PRIORITY] = CLI_REG_CMD("ptp priority [<p1> <p2>]\t\t\tPrint or set clock priority fields", 2, 0, CB_priority);
+    sCmds[CMD_GPTP] = CLI_REG_CMD("ptp gptp [status|nbthresh <ns>|lostresp <n>|gmcapable {on|off}]\t\t\tPrint the 802.1AS status, or set its parameters", 2, 0, CB_gptp);
+    sCmds[CMD_RSYNC] = CLI_REG_CMD("ptp rsync [on|off|domain <n>|rate <pct>|interval <ms>]\t\t\tReverse sync: the recovered clock sent back to a tester", 2, 0, CB_rsync);
     sCmds[CMD_N] = -1;
 #endif // CLI_REG_CMD
 }

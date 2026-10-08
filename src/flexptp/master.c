@@ -2,6 +2,7 @@
 
 #include "common.h"
 #include "flexptp_options.h"
+#include "gptp.h"
 #include "format_utils.h"
 #include "msg_utils.h"
 #include "ptp_core.h"
@@ -36,9 +37,19 @@ static PtpHeader syncHeader;
 static RawPtpMessage sync_;
 static RawPtpMessage followUp;
 static const PtpProfileTlvElement *tlvChain;
+static uint32_t announceBaseSize; ///< Announce with the profile's static TLVs, before the path trace
+
+#define PATH_TRACE_TLV_LEN (4 + 8) ///< a path trace TLV holding our clockIdentity alone
+
+/**
+ * minorVersionPTP of the messages we send: 1 in 802.1AS-2020, 0 otherwise.
+ */
+static uint8_t minor_version() {
+    return ptp_gptp_profile_is_gptp() ? PTP_GPTP_MINOR_VERSION : 0;
+}
 
 static void ptp_init_announce_header() {
-    announceHeader.minorVersionPTP = 0;
+    announceHeader.minorVersionPTP = minor_version();
     announceHeader.messageType = PTP_MT_Announce;
     announceHeader.transportSpecific = (uint8_t)S.profile.transportSpecific;
     announceHeader.versionPTP = 2;
@@ -60,12 +71,13 @@ static void ptp_init_announce_header() {
                                       PTP_MT_Announce,
                                       MAX_PTP_MSG_SIZE - PTP_PCKT_SIZE_ANNOUNCE);
 
-    announce.size = PTP_PCKT_SIZE_ANNOUNCE + tlvSize;
+    announceBaseSize = PTP_PCKT_SIZE_ANNOUNCE + tlvSize;
+    announce.size = announceBaseSize;
     announceHeader.messageLength = announce.size;
 }
 
 static void ptp_init_sync_header() {
-    syncHeader.minorVersionPTP = 0;
+    syncHeader.minorVersionPTP = minor_version();
     syncHeader.transportSpecific = S.profile.transportSpecific;
     syncHeader.messageType = PTP_MT_Sync;
     syncHeader.transportSpecific = (uint8_t)S.profile.transportSpecific;
@@ -83,7 +95,7 @@ static void ptp_init_sync_header() {
     syncHeader.logMessagePeriod = S.profile.logSyncPeriod;
 
     // insert TLVs from the profile
-    uint16_t tlvSize = ptp_tlv_insert(announce.data + PTP_PCKT_SIZE_SYNC,
+    uint16_t tlvSize = ptp_tlv_insert(sync_.data + PTP_PCKT_SIZE_SYNC,
                                       tlvChain,
                                       PTP_MT_Sync,
                                       MAX_PTP_MSG_SIZE - PTP_PCKT_SIZE_SYNC);
@@ -106,6 +118,23 @@ static void ptp_send_announce_message() {
     // set sequence ID
     announceHeader.sequenceID = S.master.messaging.announceSequenceID++;
     announceHeader.transportSpecific = S.profile.transportSpecific;
+
+    // 802.1AS: a path trace TLV of the grandmaster, us (IEEE 802.1AS-2020 10.6.3.3)
+    announce.size = announceBaseSize;
+
+    if (S.gptp.enabled && (announce.size + PATH_TRACE_TLV_LEN <= MAX_PTP_MSG_SIZE)) {
+        uint8_t *tlv = announce.data + announce.size;
+
+        tlv[0] = 0;
+        tlv[1] = PTP_TLV_PATH_TRACE;
+        tlv[2] = 0;
+        tlv[3] = 8;
+        memcpy(tlv + 4, &S.hwoptions.clockIdentity, 8);
+
+        announce.size += PATH_TRACE_TLV_LEN;
+    }
+
+    announceHeader.messageLength = announce.size;
 
     // fill-in fields
     ptp_construct_binary_header(announce.data, &announceHeader);           // insert header
@@ -131,7 +160,7 @@ static void ptp_send_follow_up(const RawPtpMessage *pMsg) {
     TimestampI t1 = pMsg->ts;
 
     // modify header fields
-    header.minorVersionPTP = 0;
+    header.minorVersionPTP = minor_version();
     header.transportSpecific = S.profile.transportSpecific;
     header.messageType = PTP_MT_Follow_Up;
     header.messageLength = followUp.size;
@@ -410,14 +439,28 @@ void ptp_master_reset() {
     memset(&S.master.messaging, 0, sizeof(PtpMasterMessagingState));
 }
 
+void ptp_master_update_intervals() {
+    if (S.gptp.enabled) {
+        // 802.1AS: the current intervals, which message interval requests move
+        S.master.syncTickPeriod = ptp_gptp_log_to_ticks(S.gptp.logSync);
+        S.master.announceTickPeriod = ptp_gptp_log_to_ticks(S.gptp.logAnnounce);
+
+        syncHeader.logMessagePeriod = S.gptp.logSync;
+        announceHeader.logMessagePeriod = S.gptp.logAnnounce;
+        return;
+    }
+
+    S.master.syncTickPeriod = ptp_logi2ms(S.profile.logSyncPeriod) / PTP_HEARTBEAT_TICKRATE_MS;
+    S.master.announceTickPeriod = ptp_logi2ms(S.profile.logAnnouncePeriod) / PTP_HEARTBEAT_TICKRATE_MS;
+    S.master.pdelayReqTickPeriod = ptp_logi2ms((S.profile.logDelayReqPeriod == PTP_LOGPER_SYNCMATCHED) ? S.profile.logSyncPeriod : S.profile.logDelayReqPeriod) / PTP_HEARTBEAT_TICKRATE_MS;
+}
+
 void ptp_master_enable() {
     // enable the module
     S.master.enabled = true;
 
     // calculate periods
-    S.master.syncTickPeriod = ptp_logi2ms(S.profile.logSyncPeriod) / PTP_HEARTBEAT_TICKRATE_MS;
-    S.master.announceTickPeriod = ptp_logi2ms(S.profile.logAnnouncePeriod) / PTP_HEARTBEAT_TICKRATE_MS;
-    S.master.pdelayReqTickPeriod = ptp_logi2ms((S.profile.logDelayReqPeriod == PTP_LOGPER_SYNCMATCHED) ? S.profile.logSyncPeriod : S.profile.logDelayReqPeriod) / PTP_HEARTBEAT_TICKRATE_MS;
+    ptp_master_update_intervals();
 
     // clear counters
     S.master.syncTmr = 0;
@@ -446,13 +489,26 @@ void ptp_master_tick() {
     PtpDelayMechanism dm = S.profile.delayMechanism; // fetch Delay Mechanism
 
     // gating signal for Sync and Announce transmission
-    bool infoEn = (dm == PTP_DM_E2E) || ((dm == PTP_DM_P2P) && ((S.master.p2pSlave.state == PTP_P2PSS_ESTABLISHED) || (!(S.profile.flags & PTP_PF_ISSUE_SYNC_FOR_COMPLIANT_SLAVE_ONLY_IN_P2P))));
+    bool infoEn;
+    bool syncEn;
+    bool announceEn;
+
+    if (S.gptp.enabled) {
+        // 802.1AS: only while asCapable, and unless a message interval request stopped them
+        infoEn = S.gptp.pdelay.asCapable;
+        syncEn = infoEn && !S.gptp.syncStopped;
+        announceEn = infoEn && !S.gptp.announceStopped;
+    } else {
+        infoEn = (dm == PTP_DM_E2E) || ((dm == PTP_DM_P2P) && ((S.master.p2pSlave.state == PTP_P2PSS_ESTABLISHED) || (!(S.profile.flags & PTP_PF_ISSUE_SYNC_FOR_COMPLIANT_SLAVE_ONLY_IN_P2P))));
+        syncEn = infoEn;
+        announceEn = infoEn;
+    }
 
     // Sync transmission
     if (++S.master.syncTmr >= S.master.syncTickPeriod) {
         S.master.syncTmr = 0;
 
-        if (infoEn) {
+        if (syncEn) {
             ptp_send_sync_message();
             PTP_IUEV(PTP_UEV_SYNC_SENT);
         }
@@ -463,7 +519,7 @@ void ptp_master_tick() {
         S.master.announceTmr = 0;
     }
 
-    if (infoEn) {
+    if (announceEn) {
         // shift Announce transmission phase with 1 tick
         if (S.master.announceTmr == 1) {
             ptp_send_announce_message();
@@ -471,8 +527,8 @@ void ptp_master_tick() {
         }
     }
 
-    // issue PDelay_Req messages
-    if (dm == PTP_DM_P2P) {
+    // issue PDelay_Req messages (in 802.1AS the peer delay mechanism runs on its own)
+    if ((dm == PTP_DM_P2P) && !S.gptp.enabled) {
         if (++S.master.pdelayReqTmr >= S.master.pdelayReqTickPeriod) { // advance the PDelay_Req counter
             S.master.pdelayReqTmr = 0;
         }

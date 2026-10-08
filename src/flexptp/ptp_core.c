@@ -175,6 +175,12 @@ void ptp_process_packet(RawPtpMessage *pRawMsg) {
     // header readout
     ptp_extract_header(&header, pRawMsg->data);
 
+    // an 802.1AS profile has its own message handling
+    if (S.gptp.enabled) {
+        ptp_gptp_process_packet(pRawMsg, &header);
+        return;
+    }
+
     // consider only messages in our domain
     if (header.domainNumber != S.profile.domainNumber ||
         header.transportSpecific != S.profile.transportSpecific) {
@@ -214,7 +220,9 @@ void ptp_process_event(const PtpCoreEvent *event) {
     switch (event->code) {
     case PTP_CEV_HEARTBEAT: { // heartbeat event
         S.ticks++;
-        ptp_bmca_tick();
+        if (!S.gptp.enabled) {
+            ptp_bmca_tick(); // the 802.1AS BMCA ticks in ptp_gptp_tick()
+        }
         ptp_slave_tick();
         ptp_master_tick();
         ptp_gptp_tick();
@@ -242,6 +250,9 @@ void ptp_process_event(const PtpCoreEvent *event) {
     case PTP_CEV_AUX_TIMER: {
         ptp_gptp_aux_timer();
     } break;
+    case PTP_CEV_GPTP_APPLY: {
+        ptp_gptp_apply();
+    } break;
     default:
         break;
     }
@@ -259,7 +270,7 @@ void ptp_reset() {
 }
 
 void ptp_nsd_link_state_changed(bool up) {
-    PtpCoreEvent event = { .code = PTP_CEV_LINK_STATE, .w = { .w = up ? 1 : 0 }, .dw = 0 };
+    PtpCoreEvent event = { .code = PTP_CEV_LINK_STATE, .w = { .w = up ? 1 : 0 }, .dw = { .dw = 0 } };
     ptp_event_enqueue(&event);
 }
 

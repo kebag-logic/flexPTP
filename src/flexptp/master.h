@@ -36,6 +36,12 @@ void ptp_master_reset();
 void ptp_master_tick();
 
 /**
+ * Recompute the Sync and Announce schedule from the current intervals (in
+ * 802.1AS, after a message interval request moved them).
+ */
+void ptp_master_update_intervals();
+
+/**
  * Enable the master module.
  */
 void ptp_master_enable();

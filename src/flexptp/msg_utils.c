@@ -77,9 +77,10 @@ void ptp_extract_header(PtpHeader *pHeader, const void *pPayload) {
     // read flags
     ptp_load_flags(&pHeader->flags, FLEXPTP_ntohs(flags));
 
-    // read correction field
-    pHeader->correction_subns = FLEXPTP_ntohll(pHeader->correction_ns) & 0xffff;
-    pHeader->correction_ns = FLEXPTP_ntohll(pHeader->correction_ns) >> 16;
+    // read correction field: signed scaled nanoseconds, kept two's complement in the unsigned field
+    int64_t correction = (int64_t)FLEXPTP_ntohll(pHeader->correction_ns);
+    pHeader->correction_subns = (uint32_t)(correction & 0xffff);
+    pHeader->correction_ns = (uint64_t)(correction >> 16);
 
     pHeader->messageLength = FLEXPTP_ntohs(pHeader->messageLength);
     pHeader->sourcePortID = FLEXPTP_ntohs(pHeader->sourcePortID);
@@ -136,7 +137,7 @@ void ptp_extract_announce_message(PtpAnnounceBody *pAnnounce, void *pPayload) {
 
     pAnnounce->currentUTCOffset = FLEXPTP_ntohs(pAnnounce->currentUTCOffset);
     pAnnounce->grandmasterClockVariance = FLEXPTP_ntohs(pAnnounce->grandmasterClockVariance);
-    pAnnounce->grandmasterClockIdentity = FLEXPTP_ntohll(pAnnounce->grandmasterClockIdentity);
+    // grandmasterClockIdentity stays in wire order, as every clockIdentity in the core does
     pAnnounce->localStepsRemoved = FLEXPTP_ntohs(pAnnounce->localStepsRemoved);
 }
 

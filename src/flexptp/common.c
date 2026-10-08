@@ -7,6 +7,7 @@
 #include "ptp_core.h"
 #include "task_ptp.h"
 
+#include "gptp.h"
 #include "msg_utils.h"
 #include "ptp_defs.h"
 #include "ptp_types.h"
@@ -77,7 +78,7 @@ void ptp_send_pdelay_resp_follow_up(const RawPtpMessage *pMsg) {
     header.messageType = PTP_MT_PDelay_Resp_Follow_Up; // change message type
     ptp_clear_flags(&header.flags);                    // clear flags
     header.messageLength = PTP_PCKT_SIZE_PDELAY_RESP_FOLLOW_UP;
-    header.minorVersionPTP = 0;
+    header.minorVersionPTP = S.gptp.enabled ? PTP_GPTP_MINOR_VERSION : 0;
 
     // write fields
     ptp_construct_binary_header(pdelRespFUpMsg.data, &header); // HEADER
@@ -106,6 +107,14 @@ void ptp_send_pdelay_resp(const RawPtpMessage *pMsg) {
     TimestampI t2 = pMsg->ts;
     ptp_extract_header(&header, pMsg->data);
     header.minorVersionPTP = 0; // minorVersionPTP should be fixed to 0
+
+    // 802.1AS: minorVersionPTP 1, and the correctionField carries only the
+    // fractional nanoseconds of t2 (none here)
+    if (S.gptp.enabled) {
+        header.minorVersionPTP = PTP_GPTP_MINOR_VERSION;
+        header.correction_ns = 0;
+        header.correction_subns = 0;
+    }
 
     // create requestingSourcePortIdentity based on clockId from the header
     PtpDelay_RespIdentification reqDelRespId = {header.clockIdentity, header.sourcePortID};

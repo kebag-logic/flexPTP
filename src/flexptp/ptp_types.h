@@ -42,7 +42,8 @@ typedef enum PTPMessageType {
     PTP_MT_Follow_Up = 8,              ///< Follow Up
     PTP_MT_Delay_Resp = 9,             ///< Delay Response
     PTP_MT_PDelay_Resp_Follow_Up = 10, ///< Peer Delay Response Follow Up
-    PTP_MT_Announce = 11               ///< Announce
+    PTP_MT_Announce = 11,              ///< Announce
+    PTP_MT_Signaling = 12              ///< Signaling
 } PtpMessageType;
 
 /**
@@ -503,11 +504,163 @@ typedef enum { PTP_FC_IDLE = 0,                    ///< Fast correction algorith
                PTP_FC_TIME_CORRECTION_PROPAGATION, ///< Waiting for the effects of time correction to propagate
 } PtpFastCompState;
 
+#define PTP_GPTP_NRR_WINDOW (8)        ///< Pdelay exchanges spanned by a neighborRateRatio measurement
+#define PTP_GPTP_DELAY_FILTER_LEN (7)  ///< samples in the meanLinkDelay median filter
+#define PTP_GPTP_PATH_TRACE_MAX (16)   ///< path trace entries kept from an Announce
+
 /**
- * @brief IEEE 802.1AS (gPTP) state of the port.
+ * @brief A (t3, t4) pair of a completed Pdelay exchange: the responder's
+ * Pdelay_Resp egress and our Pdelay_Resp ingress.
  */
 typedef struct {
-    bool linkUp; ///< the link (carrier) is up; true unless the NSD reports otherwise
+    TimestampI t3; ///< responseOriginTimestamp (the neighbour's clock)
+    TimestampI t4; ///< Pdelay_Resp ingress (our clock)
+} PtpGptpRatePoint;
+
+/**
+ * @brief The peer delay mechanism of the port (IEEE 802.1AS-2020 11.2.19).
+ */
+typedef struct {
+    // ---- the request in flight ----
+    bool inFlight;         ///< a Pdelay_Req awaits its response
+    uint16_t seq;          ///< its sequenceId
+    bool haveT1;           ///< its egress timestamp has arrived
+    bool haveResp;         ///< its Pdelay_Resp has arrived
+    bool haveRespFollowUp; ///< its Pdelay_Resp_Follow_Up has arrived
+    uint8_t responses;     ///< Pdelay_Resp received for it (more than one: multiple responders)
+    bool oneStep;          ///< its responder is one-step: no t3 in the responder's clock
+    uint64_t responder;    ///< clockIdentity of its responder (wire order)
+    uint16_t responderPort; ///< port number of its responder
+    TimestampI t1;         ///< Pdelay_Req egress (our clock)
+    TimestampI t2;         ///< Pdelay_Req ingress at the responder (its clock)
+    TimestampI t3;         ///< Pdelay_Resp egress at the responder (its clock)
+    TimestampI t4;         ///< Pdelay_Resp ingress (our clock)
+    int64_t cf2;           ///< correctionField of the Pdelay_Resp (ns)
+    int64_t cf3;           ///< correctionField of the Pdelay_Resp_Follow_Up (ns)
+
+    // ---- scheduling ----
+    uint32_t tmr;          ///< ticks since the last request
+
+    // ---- neighborRateRatio ----
+    PtpGptpRatePoint ratePts[PTP_GPTP_NRR_WINDOW + 1]; ///< ring of the latest (t3, t4) pairs
+    uint8_t ratePtsN;      ///< pairs in the ring
+    uint8_t ratePtsHead;   ///< where the next pair goes
+    double nrr;            ///< neighborRateRatio
+    bool nrrValid;         ///< nrr has been measured
+
+    // ---- neighborPropDelay ----
+    int64_t delaySamples[PTP_GPTP_DELAY_FILTER_LEN]; ///< ring of the latest link delays (ns)
+    uint8_t delayN;        ///< samples in the ring
+    uint8_t delayHead;     ///< where the next sample goes
+    int64_t meanLinkDelay; ///< the median of the ring (ns)
+    bool delayValid;       ///< meanLinkDelay has been measured
+
+    // ---- asCapable ----
+    uint16_t lostResponses;  ///< consecutive requests without a complete response
+    bool multipleResponders; ///< the last request was answered by more than one port
+    bool selfResponder;      ///< the last response came from our own clockIdentity
+    bool isMeasuringDelay;   ///< 802.1AS isMeasuringDelay
+    bool asCapable;          ///< 802.1AS asCapable
+
+    // ---- counters ----
+    uint32_t lostTotal;     ///< requests without a complete response
+    uint32_t multipleTotal; ///< requests answered by more than one port
+} PtpGptpPdelayState;
+
+/**
+ * @brief An 802.1AS priority vector (IEEE 802.1AS-2020 10.3.4): the
+ * grandmaster's systemIdentity, then stepsRemoved, then the port identity of
+ * the Announce's sender. Identities in wire order.
+ */
+typedef struct {
+    uint8_t priority1;       ///< grandmaster priority1
+    uint8_t clockClass;      ///< grandmaster clockClass
+    uint8_t clockAccuracy;   ///< grandmaster clockAccuracy
+    uint16_t variance;       ///< grandmaster offsetScaledLogVariance
+    uint8_t priority2;       ///< grandmaster priority2
+    uint64_t gmIdentity;     ///< grandmaster clockIdentity
+    uint16_t stepsRemoved;   ///< stepsRemoved of the Announce
+    uint64_t senderIdentity; ///< clockIdentity of the Announce's sender
+    uint16_t senderPort;     ///< port number of the Announce's sender
+} PtpGptpPriorityVector;
+
+/**
+ * @brief The 802.1AS BMCA of a one-port end station (IEEE 802.1AS-2020 10.3).
+ */
+typedef struct {
+    bool infoValid;                ///< the master information below is current
+    PtpGptpPriorityVector master;  ///< the best master information received
+    uint16_t utcOffset;            ///< its currentUtcOffset
+    uint8_t timeSource;            ///< its timeSource
+    uint16_t pathTraceN;           ///< entries in pathTrace
+    uint64_t pathTrace[PTP_GPTP_PATH_TRACE_MAX]; ///< its path trace (wire order)
+    int8_t masterLogAnnounce;      ///< the master's logMessageInterval for Announce
+    int8_t masterLogSync;          ///< the master's logMessageInterval for Sync
+    uint32_t announceTmr;          ///< ticks since its last Announce
+    uint32_t syncTmr;              ///< ticks since its last Sync
+    uint32_t listenTmr;            ///< ticks spent in LISTENING
+    uint64_t gmIdentity;           ///< the current grandmaster (wire order), 0: none
+    uint32_t gmChanges;            ///< grandmaster changes since start
+    uint32_t announceRx;           ///< Announce messages accepted
+    uint32_t announceTimeouts;     ///< announce receipt timeouts
+    uint32_t syncRx;               ///< Sync/Follow_Up pairs from the master
+    uint32_t syncTimeouts;         ///< sync receipt timeouts
+} PtpGptpBmcaState;
+
+/**
+ * @brief The Follow_Up information TLV (IEEE 802.1AS-2020 11.4.4.3) of the
+ * last Follow_Up accepted from the master.
+ */
+typedef struct {
+    bool valid;                         ///< a TLV has been received
+    int32_t cumulativeScaledRateOffset; ///< (rateRatio - 1) * 2^41
+    uint16_t gmTimeBaseIndicator;       ///< changes when the grandmaster's time base does
+    uint8_t lastGmPhaseChange[12];      ///< ScaledNs, as on the wire
+    int32_t scaledLastGmFreqChange;     ///< as on the wire
+} PtpGptpFollowUpInfo;
+
+/**
+ * @brief Reverse sync: the recovered clock sent back to a tester, the egress
+ * method of Avnu's "802.1AS Recovered Clock Quality Testing".
+ */
+typedef struct {
+    bool enabled;         ///< reverseSyncEnabled
+    uint8_t domain;       ///< reverseSyncDomain
+    uint16_t ratePct;     ///< reverseSyncRate: interval as a percentage of the incoming Sync interval
+    uint32_t interval_ms; ///< a fixed interval instead, 0: use ratePct
+    uint32_t period_us;   ///< the period the timer runs at, 0: stopped
+    uint16_t seq;         ///< sequenceId of the next reverse Sync
+    uint32_t sent;        ///< reverse Sync/Follow_Up pairs sent
+} PtpGptpRsyncState;
+
+/**
+ * @brief IEEE 802.1AS (gPTP) time-aware end station state of the port.
+ */
+typedef struct {
+    bool enabled; ///< the profile is an 802.1AS one (majorSdoId 1, P2P, 802.3)
+    bool linkUp;  ///< the link (carrier) is up; true unless the NSD reports otherwise
+
+    // ---- configuration (kept across resets) ----
+    int64_t neighborPropDelayThresh_ns; ///< asCapable needs a link delay at most this
+    uint16_t allowedLostResponses;      ///< consecutive unanswered Pdelay_Req tolerated
+    bool gmCapable;                     ///< this end station may become grandmaster
+
+    // ---- current intervals: the profile's, unless a message interval request moved them ----
+    int8_t logPdelay;     ///< currentLogPdelayReqInterval
+    int8_t logSync;       ///< currentLogSyncInterval (as master)
+    int8_t logAnnounce;   ///< currentLogAnnounceInterval (as master)
+    bool pdelayStopped;   ///< a request said 127 for linkDelayInterval
+    bool syncStopped;     ///< a request said 127 for timeSyncInterval
+    bool announceStopped; ///< a request said 127 for announceInterval
+    bool computeNrr;      ///< computeNeighborRateRatio
+    bool computeDelay;    ///< computeNeighborPropDelay
+    uint32_t signalingRx; ///< message interval requests applied
+
+    PtpGptpPdelayState pdelay;  ///< the peer delay mechanism
+    PtpGptpBmcaState bmca;      ///< the BMCA
+    PtpGptpFollowUpInfo fuInfo; ///< the master's last Follow_Up information
+    double rateRatio;           ///< the grandmaster's clock / ours
+    PtpGptpRsyncState rsync;    ///< reverse sync
 } PtpGptpState;
 
 /**

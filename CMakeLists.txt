@@ -159,6 +159,13 @@ set(FLEXPTP_SRC
     format_utils.h
     gptp.c
     gptp.h
+    gptp_bmca.c
+    gptp_msg.c
+    gptp_pdelay.c
+    gptp_rsync.c
+    gptp_settings.c
+    gptp_settings.h
+    gptp_signaling.c
     gptp_status.c
     gptp_status.h
     logging.c

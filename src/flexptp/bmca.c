@@ -34,7 +34,17 @@ int ptp_select_better_master(PtpMasterProperties *pMP1, PtpMasterProperties *pMP
     COMPARE_AND_RETURN(pMP1, pMP2, grandmasterClockAccuracy);
     COMPARE_AND_RETURN(pMP1, pMP2, grandmasterClockVariance);
     COMPARE_AND_RETURN(pMP1, pMP2, priority2);
-    COMPARE_AND_RETURN(pMP1, pMP2, grandmasterClockIdentity);
+
+    // clockIdentities are kept in wire order: compare them as the numbers they are
+    uint64_t id1 = FLEXPTP_ntohll(pMP1->grandmasterClockIdentity);
+    uint64_t id2 = FLEXPTP_ntohll(pMP2->grandmasterClockIdentity);
+
+    if (id1 < id2) {
+        return 0;
+    } else if (id1 > id2) {
+        return 1;
+    }
+
     return 1;
 }
 

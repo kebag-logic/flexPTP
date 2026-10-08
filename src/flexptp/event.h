@@ -22,6 +22,7 @@ typedef enum {
     PTP_CEV_TERMINATE,          ///< A shutdown is requested
     PTP_CEV_LINK_STATE,         ///< The link went up (w = 1) or down (w = 0)
     PTP_CEV_AUX_TIMER,          ///< The auxiliary timer has expired (see ptp_aux_timer_set())
+    PTP_CEV_GPTP_APPLY,         ///< gPTP settings changed: apply them in the core's context
 } PtpCoreEventCode;
 
 #include <stdint.h>

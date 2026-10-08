@@ -58,7 +58,8 @@ static void ptp_tune_clock(float tuning_ppb) {
  */
 static void ptp_perform_correction() {
     // don't do any processing if no delay_request data is present
-    if (!nonZeroI(&S.network.meanPathDelay)) {
+    bool haveDelay = S.gptp.enabled ? S.gptp.pdelay.delayValid : nonZeroI(&S.network.meanPathDelay);
+    if (!haveDelay) {
         return;
     }
 
@@ -548,6 +549,11 @@ void ptp_slave_reset() {
 
 void ptp_slave_tick() {
     if (!S.slave.enabled) {
+        return;
+    }
+
+    // in 802.1AS the peer delay mechanism runs on its own, in every port state
+    if (S.gptp.enabled) {
         return;
     }
 

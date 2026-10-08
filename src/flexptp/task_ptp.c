@@ -246,7 +246,7 @@ void ptp_start_heartbeat_tmr() {
 static void ptp_aux_tmr_cb(union sigval data) {
     (void)data;
 
-    PtpCoreEvent event = {.code = PTP_CEV_AUX_TIMER, .w = 0, .dw = 0};
+    PtpCoreEvent event = {.code = PTP_CEV_AUX_TIMER, .w = {.w = 0}, .dw = {.dw = 0}};
     ptp_event_enqueue(&event);
 }
 #endif
@@ -949,7 +949,7 @@ fifo_pop(&sNotificationFIFO, &notification);
                 if ((sAuxPeriodTicks != 0) && (++sAuxTickCntr >= sAuxPeriodTicks)) {
                     sAuxTickCntr = 0;
 
-                    PtpCoreEvent aux = {.code = PTP_CEV_AUX_TIMER, .w = 0, .dw = 0};
+                    PtpCoreEvent aux = {.code = PTP_CEV_AUX_TIMER, .w = {.w = 0}, .dw = {.dw = 0}};
                     ptp_event_enqueue(&aux);
                 }
 #endif
