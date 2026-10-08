@@ -3,8 +3,9 @@
  * @file    flexptp_options.h
  * @copyright Kebag-Logic, 2026
  * @brief   flexPTP build options for flexptpd, the Linux daemon: the PHC and
- * hardware timestamps of the Linux network stack driver, the Kalman servo,
- * and the defaults of an IEEE 802.1AS end station.
+ * hardware timestamps of the Linux network stack driver (or its virtual
+ * clock), the Kalman servo, the CLI, and the defaults of an IEEE 802.1AS end
+ * station.
  ******************************************************************************
  */
 
@@ -18,16 +19,18 @@
 
 #define PTP_HEARTBEAT_TICKRATE_MS (31)
 
-// ---- printing ----
+// ---- printing: coloured on a terminal only (flexptpd_print.h) ----
 
 #include <stdio.h>
 
-#define MSG(...) printf(__VA_ARGS__)
+int flexptpd_printf(const char *fmt, ...) __attribute__((format(printf, 1, 2)));
 
-#define CLILOG(en, ...)          \
-    {                            \
-        if (en)                  \
-            printf(__VA_ARGS__); \
+#define MSG(...) flexptpd_printf(__VA_ARGS__)
+
+#define CLILOG(en, ...)                  \
+    {                                    \
+        if (en)                          \
+            flexptpd_printf(__VA_ARGS__); \
     }
 
 #define FLEXPTP_SNPRINTF(...) snprintf(__VA_ARGS__)
@@ -40,9 +43,9 @@
 
 extern char ptp_if_name[];
 
-#define PTP_HW_INIT()                        \
-    if (!linux_nsd_preinit(ptp_if_name)) {   \
-        exit(1);                             \
+#define PTP_HW_INIT()                      \
+    if (!linux_nsd_preinit(ptp_if_name)) { \
+        exit(1);                           \
     }
 
 #define PTP_SET_CLOCK(s, ns) linux_set_time((s), (ns))
@@ -57,6 +60,12 @@ extern char ptp_if_name[];
 #define PTP_SERVO_DEINIT() kalman_filter_deinit()
 #define PTP_SERVO_RESET() kalman_filter_reset()
 #define PTP_SERVO_RUN(d, pscd) kalman_filter_run(d, pscd)
+
+// ---- CLI: the core registers its commands with flexptpd's ----
+
+#include <cli/cli.h>
+
+#define CLI_REG_CMD(cmd_hintline, n_cmd, n_min_arg, cb) cli_register_command(cmd_hintline, n_cmd, n_min_arg, cb)
 
 // ---- clock dataset: an 802.1AS end station that may become grandmaster ----
 
