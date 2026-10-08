@@ -8,6 +8,63 @@
 
 *The library is released under the MIT license with the endeavour to provide quick and compact solution for embedded time synchronization.*
 
+## This fork: an IEEE 802.1AS end station on Linux
+
+This is Kebag-Logic's fork of [epagris/flexPTP](https://github.com/epagris/flexPTP).
+Branch `gptp` adds an IEEE 802.1AS-2020 time-aware end station on top of
+flexPTP's IEEE 1588 ordinary clock, and a Linux daemon around it. It runs the
+gPTP of the PocketBeagle 2 USB-to-Milan bridge
+([kebag-logic/ti-sitara-am65x-bsp](https://github.com/kebag-logic/ti-sitara-am65x-bsp),
+issue #19). Every other profile keeps upstream's behaviour: the 802.1AS layer
+runs only when the loaded profile is an 802.1AS one (majorSdoId 1, the
+peer-to-peer delay mechanism, 802.3), as the `gPTP` preset is.
+
+**The 802.1AS layer** (`src/flexptp/gptp*.c`):
+
+- **Peer delay** (clause 11): the initiator runs in every port state, and an
+  exchange completes whatever order its timestamps arrive in.
+  - neighborRateRatio over a window of exchanges.
+  - A median-filtered neighborPropDelay.
+  - asCapable: a delay within `neighborPropDelayThresh`, at most
+    `allowedLostResponses` unanswered, one responder, not ourselves, and a
+    measured rate ratio.
+- **The BMCA of a one-port end station** (clause 10): the 802.1AS priority
+  vector.
+  - Announce with path trace; a looped path trace or stepsRemoved 255 is
+    discarded.
+  - The announce and sync receipt timeouts.
+  - Sync and Follow_Up only from the selected master's port, with the
+    Follow_Up information TLV.
+  - The grandmaster role only while asCapable.
+- **Signaling**: the message interval request TLV, including -128, 126 and
+  127, and its flags.
+- **Reverse sync**, the egress method of Avnu's "802.1AS Recovered Clock
+  Quality Testing": the recovered clock sent back to a tester as Sync/Follow_Up
+  on a second domain, at a rate of its own (90 % of the incoming Sync interval
+  by default).
+- **A status snapshot**, `PtpGptpStatus` (`src/flexptp/gptp_status.h`), and
+  the settings in `src/flexptp/gptp_settings.h`. On the CLI they are
+  `ptp gptp ...` and `ptp rsync ...`.
+
+**The Linux platform** (`src/flexptp/port/example_netstack_drivers/nsd_linux*.c`,
+`linux/`):
+
+- Transmit timestamps are matched to their messages by content, and given up
+  after a bounded wait, so a lost one cannot stall the stack.
+- The link state comes from netlink.
+- A software-timestamp mode with a virtual clock, for tests over veth.
+- `flexptpd`, the daemon: a configuration file of CLI commands, `SCHED_FIFO`,
+  and the status published in `/dev/shm`. See [linux/README.md](linux/README.md).
+
+**Tests:**
+
+- `make -C tests/linux check`: the transmit timestamp matcher, and two daemons
+  over veth through a link drop.
+- `tests/conformance/run.sh`: the conformance suite. A Python tester plays
+  grandmaster, peer, misbehaving peer and reverse-sync receiver against
+  `flexptpd` in a network namespace, check by check. See
+  [tests/conformance/README.md](tests/conformance/README.md).
+
 ## Features
 
 > [!TIP]
