@@ -445,7 +445,10 @@ def g2_responder(ctx: Context) -> list:
     """G2.4 the DUT's Pdelay_Resp: within 10 ms, the right fields."""
     ctx.responder()
     dut = ctx.dut()
-    dut.wait_status(lambda st: st.linkUp, 5.0)
+
+    # measured once the DUT is up and running its port: a request that lands
+    # while it is still starting up is not a responder fault
+    dut.wait_status(lambda st: st.asCapable, 10.0)
     dut_id = dut.identity()
 
     init = PdelayInitiator(ctx.ep)
